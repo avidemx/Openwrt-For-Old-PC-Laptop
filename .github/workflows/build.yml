@@ -40,13 +40,13 @@ jobs:
       - name: Download & Inject External Toolchain
         run: |
           mkdir -p /opt/toolchain
-          
-          echo "Mengunduh Toolchain x86_64..."
           wget -q "$TOOLCHAIN_URL" -O toolchain.tar.zst
           tar --zstd -xf toolchain.tar.zst -C /opt/toolchain --strip-components=2 --wildcards "*/toolchain-x86_64_gcc-*"
           rm toolchain.tar.zst
+          
+          # Verifikasi ekstraksi toolchain (Fail-fast)
+          test -d /opt/toolchain/bin || { echo "❌ Error: Toolchain extraction failed!"; exit 1; }
 
-          echo "Mengunduh LLVM..."
           wget -q "$LLVM_URL" -O llvm.tar.zst
           mkdir -p staging_dir
           tar --zstd -xf llvm.tar.zst -C staging_dir/
@@ -56,7 +56,6 @@ jobs:
         run: |
           mkdir -p files/etc/uci-defaults
           
-          # --- 1. SCRIPT RESIZE PARTISI ---
           cat << "EOF" > files/etc/uci-defaults/70-rootpt-resize
           if [ ! -e /etc/rootpt-resize ] && type parted > /dev/null && lock -n /var/lock/root-resize; then
             ROOT_BLK="$(readlink -f /sys/dev/block/"$(awk -e '$9=="/dev/root"{print $3}' /proc/self/mountinfo)")"
@@ -96,12 +95,11 @@ jobs:
           /etc/uci-defaults/80-rootfs-resize
           EOF
 
-          # --- 2. SCRIPT FIRST BOOT ---
           cat << "EOF" > files/etc/uci-defaults/99-custom-config
           uci set system.@system[0].timezone='WIB-7'
           uci set system.@system[0].zonename='Asia/Jakarta'
           uci commit system
-
+          
           uci set network.lan.ipaddr='192.168.10.1/24'
           
           uci -q delete network.Dell_DW5821e
@@ -137,38 +135,50 @@ jobs:
           uci add_list firewall.${WAN_IDX}.network="usbwan"
           uci add_list firewall.${WAN_IDX}.network="Dell_DW5821e"
           uci commit firewall
-          
           exit 0
           EOF
           chmod +x files/etc/uci-defaults/*
-
-      - name: Patch Kernel Config (AMD IXP SB4x0)
-        run: |
-          KERNEL_CONFIG="target/linux/x86/config-6.12"
-          
-          echo "CONFIG_ATA=y" >> $KERNEL_CONFIG
-          echo "CONFIG_ATA_SFF=y" >> $KERNEL_CONFIG
-          echo "CONFIG_ATA_BMDMA=y" >> $KERNEL_CONFIG
-          echo "CONFIG_PATA_ATIIXP=y" >> $KERNEL_CONFIG
-          echo "CONFIG_ATA_PIIX=y" >> $KERNEL_CONFIG
-          echo "CONFIG_SATA_SIL=y" >> $KERNEL_CONFIG
 
       - name: Update and Install Feeds
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Generate Config & Setup Ext-Toolchain
+      - name: Patch Kernel Config Safely (Built-in AMD IXP)
+        run: |
+          echo "Patching generic x86 kernel configuration..."
+          
+          for f in target/linux/x86/config-*; do
+            [ -f "$f" ] || continue
+            echo "Membersihkan nilai lama di $f..."
+            
+            sed -i '/CONFIG_ATA=/d' "$f"
+            sed -i '/CONFIG_ATA_SFF=/d' "$f"
+            sed -i '/CONFIG_ATA_BMDMA=/d' "$f"
+            sed -i '/CONFIG_PATA_ATIIXP/d' "$f"
+            sed -i '/CONFIG_ATA_PIIX/d' "$f"
+            sed -i '/CONFIG_SATA_SIL/d' "$f"
+
+            echo "Menyuntikkan konfigurasi Built-in..."
+            cat >> "$f" <<EOF
+          CONFIG_ATA=y
+          CONFIG_ATA_SFF=y
+          CONFIG_ATA_BMDMA=y
+          CONFIG_PATA_ATIIXP=y
+          CONFIG_ATA_PIIX=y
+          CONFIG_SATA_SIL=y
+          EOF
+          done
+
+      - name: Generate .config & Evaluate Toolchain
         run: |
           wget -q https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/config.buildinfo -O .config
           
           sed -i '/CONFIG_ALL_KMODS=y/d; /CONFIG_ALL_NONSHARED=y/d; /CONFIG_IB=y/d; /CONFIG_SDK=y/d; /CONFIG_SDK_LLVM_BPF=y/d; /CONFIG_MAKE_TOOLCHAIN=y/d; /CONFIG_BUILDBOT=y/d' .config
           
-          # Memastikan format file ext4 ikut diproduksi
           echo "CONFIG_TARGET_ROOTFS_EXT4FS=y" >> .config
           echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config
           
-          # Injeksi package
           PACKAGES="kmod-usb-net-rtl8152 kmod-r8169 kmod-rtl8192se kmod-usb-ohci kmod-usb-ehci-pci kmod-usb2 kmod-pci kmod-i2c-piix4 kmod-ohci-pci kmod-ehci-pci kmod-k8temp kmod-radeon kmod-drm-radeon kmod-yenta-cardbus kmod-pcmcia-yenta kmod-firewire-ohci kmod-firewire-core kmod-tifm-7xx1 kmod-tifm-core kmod-sdhci-pci kmod-sdhci kmod-sound-hda-intel modemmanager modemmanager-rpcd libmbim libqmi luci-proto-modemmanager kmod-usb-serial-option kmod-usb-net-cdc-mbim umbim kmod-usb-acm kmod-usb-wdm kmod-usb-net-rndis parted losetup resize2fs blkid"
           
           for pkg in $PACKAGES; do
@@ -176,8 +186,34 @@ jobs:
           done
           
           ./scripts/ext-toolchain.sh --toolchain /opt/toolchain --overwrite-config --config $OWRT_ARCH
+          make defconfig
           
-          make defconfig V=s
+          echo "--- Diffconfig (Perbedaan dari Default) ---"
+          ./scripts/diffconfig.sh
+
+      - name: Prepare Kernel
+        run: |
+          make target/linux/prepare V=s
+
+      - name: Verify AMD IXP Driver (Final Kernel Check)
+        run: |
+          echo "Memeriksa hasil akhir Kernel Configuration setelah 'prepare'..."
+          KERNEL_CONFIG_FILE=$(find build_dir -path '*/linux-*/.config' | head -n 1)
+          
+          if [ -z "$KERNEL_CONFIG_FILE" ]; then
+            echo "❌ Error: File .config kernel tidak ditemukan!"
+            exit 1
+          fi
+          
+          echo "Memverifikasi opsi Kernel di: $KERNEL_CONFIG_FILE"
+          
+          for opt in CONFIG_ATA CONFIG_ATA_SFF CONFIG_ATA_BMDMA CONFIG_PATA_ATIIXP CONFIG_ATA_PIIX CONFIG_SATA_SIL; do
+              grep -q "^${opt}=y$" "$KERNEL_CONFIG_FILE" || {
+                  echo "❌ GAGAL: Setelan kernel '$opt' tidak ditemukan atau bukan =y!"
+                  exit 1
+              }
+          done
+          echo "✅ VERIFIKASI SUKSES: Semua sub-sistem ATA/PATA berhasil ditanamkan ke dalam inti Kernel!"
 
       - name: Download Packages
         run: |
@@ -193,7 +229,7 @@ jobs:
         id: tag
         run: |
           echo "release_tag=v25.12.5-x86-$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_OUTPUT
-          echo "release_name=OpenWrt 25.12.5 x86_64 (Custom AMD IXP) $(date +'%Y.%m.%d')" >> $GITHUB_OUTPUT
+          echo "release_name=OpenWrt 25.12.5 x86_64 (Native Boot AMD IXP) $(date +'%Y.%m.%d')" >> $GITHUB_OUTPUT
 
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2.6.1
@@ -206,11 +242,3 @@ jobs:
             bin/targets/x86/64/*ext4-combined.img.gz
             bin/targets/x86/64/*ext4-combined-efi.img.gz
             bin/targets/x86/64/sha256sums
-          body: |
-            ## Custom OpenWrt 25.12.5 x86_64
-            
-            **Fitur:**
-            * Driver AMD IXP SB4x0 (PATA/SATA Jadul)
-            * ModemManager terkonfigurasi (Dell DW5821e)
-            * Skrip Auto-Resize Partisi & Filesystem
-            * Konfigurasi WiFi & LAN First Boot
