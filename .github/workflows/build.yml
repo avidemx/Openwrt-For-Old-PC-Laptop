@@ -9,7 +9,7 @@ permissions:
 env:
   TOOLCHAIN_URL: "https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/openwrt-toolchain-25.12.5-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
   LLVM_URL: "https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/llvm-bpf-21.1.6.Linux-x86_64.tar.zst"
-  TARGET_ARCH: "x86/64"
+  OWRT_ARCH: "x86/64"
 
 jobs:
   build:
@@ -173,9 +173,7 @@ jobs:
             echo "CONFIG_PACKAGE_$pkg=y" >> .config
           done
           
-          ./scripts/ext-toolchain.sh --toolchain /opt/toolchain --overwrite-config --config $TARGET_ARCH
-          
-          unset TARGET_ARCH
+          ./scripts/ext-toolchain.sh --toolchain /opt/toolchain --overwrite-config --config $OWRT_ARCH
           
           make defconfig V=s
 
