@@ -145,11 +145,13 @@ jobs:
       - name: Patch Kernel Config (AMD IXP SB4x0)
         run: |
           KERNEL_CONFIG="target/linux/x86/config-6.12"
+          
           echo "CONFIG_ATA=y" >> $KERNEL_CONFIG
           echo "CONFIG_ATA_SFF=y" >> $KERNEL_CONFIG
-          echo "CONFIG_PATA_ATIIXP=m" >> $KERNEL_CONFIG
-          echo "CONFIG_ATA_PIIX=m" >> $KERNEL_CONFIG
-          echo "CONFIG_SATA_SIL=m" >> $KERNEL_CONFIG
+          echo "CONFIG_ATA_BMDMA=y" >> $KERNEL_CONFIG
+          echo "CONFIG_PATA_ATIIXP=y" >> $KERNEL_CONFIG
+          echo "CONFIG_ATA_PIIX=y" >> $KERNEL_CONFIG
+          echo "CONFIG_SATA_SIL=y" >> $KERNEL_CONFIG
 
       - name: Update and Install Feeds
         run: |
@@ -167,7 +169,7 @@ jobs:
           echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config
           
           # Injeksi package
-          PACKAGES="kmod-usb-net-rtl8152 kmod-r8169 kmod-rtl8192se kmod-usb-ohci kmod-usb-ehci-pci kmod-usb2 kmod-pci kmod-i2c-piix4 kmod-ohci-pci kmod-ehci-pci kmod-k8temp kmod-radeon kmod-drm-radeon kmod-yenta-cardbus kmod-pcmcia-yenta kmod-firewire-ohci kmod-firewire-core kmod-tifm-7xx1 kmod-tifm-core kmod-sdhci-pci kmod-sdhci kmod-sound-hda-intel modemmanager modemmanager-rpcd libmbim libqmi luci-proto-modemmanager kmod-usb-serial-option kmod-usb-net-cdc-mbim umbim kmod-usb-acm kmod-usb-wdm kmod-usb-net-rndis parted losetup resize2fs blkid kmod-ata-core kmod-ata-piix kmod-ata-sil kmod-pata-atiixp"
+          PACKAGES="kmod-usb-net-rtl8152 kmod-r8169 kmod-rtl8192se kmod-usb-ohci kmod-usb-ehci-pci kmod-usb2 kmod-pci kmod-i2c-piix4 kmod-ohci-pci kmod-ehci-pci kmod-k8temp kmod-radeon kmod-drm-radeon kmod-yenta-cardbus kmod-pcmcia-yenta kmod-firewire-ohci kmod-firewire-core kmod-tifm-7xx1 kmod-tifm-core kmod-sdhci-pci kmod-sdhci kmod-sound-hda-intel modemmanager modemmanager-rpcd libmbim libqmi luci-proto-modemmanager kmod-usb-serial-option kmod-usb-net-cdc-mbim umbim kmod-usb-acm kmod-usb-wdm kmod-usb-net-rndis parted losetup resize2fs blkid"
           
           for pkg in $PACKAGES; do
             echo "CONFIG_PACKAGE_$pkg=y" >> .config
