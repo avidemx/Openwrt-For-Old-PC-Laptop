@@ -1,90 +1,91 @@
-name: Build OpenWrt 25.12.5 x86_64 (Custom AMD IXP + Modem + Resize)
+name: Fast Build OpenWrt 25.12.5 x86_64 (AMD IXP + Modem)
 
 on:
   workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  TOOLCHAIN_URL: "https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/openwrt-toolchain-25.12.5-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
+  LLVM_URL: "https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/llvm-bpf-21.1.6.Linux-x86_64.tar.zst"
+  TARGET_ARCH: "x86/64"
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     
     steps:
-      - name: Install Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential clang flex bison g++ gawk \
-            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
-            python3-distutils rsync unzip zlib1g-dev file wget zstd
-
-      - name: Checkout OpenWrt 25.12.5
+      - name: Checkout OpenWrt Source
         uses: actions/checkout@v4
         with:
           repository: openwrt/openwrt
           ref: v25.12.5
 
-      - name: Download & Extract Pre-compiled Toolchain & LLVM
+      - name: Free Disk Space
         run: |
-          wget https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/openwrt-toolchain-25.12.5-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
-          wget https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/llvm-bpf-21.1.6.Linux-x86_64.tar.zst
-          tar --zstd -xf openwrt-toolchain-25.12.5-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
-          tar --zstd -xf llvm-bpf-21.1.6.Linux-x86_64.tar.zst
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo apt-get clean
 
-      - name: Update & Install Feeds
+      - name: Install Build Dependencies
         run: |
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+          sudo apt update
+          sudo apt install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+            python3-distutils rsync unzip zlib1g-dev file wget zstd
 
-      - name: Inject Custom Scripts & UCI Defaults
+      - name: Download & Inject External Toolchain
         run: |
-          # Membuat struktur folder rootfs buatan
+          mkdir -p /opt/toolchain
+          
+          echo "Mengunduh Toolchain x86_64..."
+          wget -q "$TOOLCHAIN_URL" -O toolchain.tar.zst
+          tar --zstd -xf toolchain.tar.zst -C /opt/toolchain --strip-components=2 --wildcards "*/toolchain-x86_64_gcc-*"
+          rm toolchain.tar.zst
+
+          echo "Mengunduh LLVM..."
+          wget -q "$LLVM_URL" -O llvm.tar.zst
+          mkdir -p staging_dir
+          tar --zstd -xf llvm.tar.zst -C staging_dir/
+          rm llvm.tar.zst
+
+      - name: Inject Custom Scripts (Resize & Modem)
+        run: |
           mkdir -p files/etc/uci-defaults
           
-          # --- SCRIPT RESIZE PARTISI & FILESYSTEM ---
+          # --- 1. SCRIPT RESIZE PARTISI ---
           cat << "EOF" > files/etc/uci-defaults/70-rootpt-resize
-          if [ ! -e /etc/rootpt-resize ] \
-          && type parted > /dev/null \
-          && lock -n /var/lock/root-resize
-          then
-          ROOT_BLK="$(readlink -f /sys/dev/block/"$(awk -e \
-          '$9=="/dev/root"{print $3}' /proc/self/mountinfo)")"
-          ROOT_DISK="/dev/$(basename "${ROOT_BLK%/*}")"
-          ROOT_PART="${ROOT_BLK##*[^0-9]}"
-          parted -f -s "${ROOT_DISK}" \
-          resizepart "${ROOT_PART}" 100%
-          mount_root done
-          touch /etc/rootpt-resize
-
-          if [ -e /boot/cmdline.txt ]
-          then 
-          NEW_UUID=`blkid ${ROOT_DISK}p${ROOT_PART} | sed -n 's/.*PARTUUID="\([^"]*\)".*/\1/p'`
-          sed -i "s/PARTUUID=[^ ]*/PARTUUID=${NEW_UUID}/" /boot/cmdline.txt
-          fi
-
-          reboot
+          if [ ! -e /etc/rootpt-resize ] && type parted > /dev/null && lock -n /var/lock/root-resize; then
+            ROOT_BLK="$(readlink -f /sys/dev/block/"$(awk -e '$9=="/dev/root"{print $3}' /proc/self/mountinfo)")"
+            ROOT_DISK="/dev/$(basename "${ROOT_BLK%/*}")"
+            ROOT_PART="${ROOT_BLK##*[^0-9]}"
+            parted -f -s "${ROOT_DISK}" resizepart "${ROOT_PART}" 100%
+            mount_root done
+            touch /etc/rootpt-resize
+            if [ -e /boot/cmdline.txt ]; then 
+              NEW_UUID=`blkid ${ROOT_DISK}p${ROOT_PART} | sed -n 's/.*PARTUUID="\([^"]*\)".*/\1/p'`
+              sed -i "s/PARTUUID=[^ ]*/PARTUUID=${NEW_UUID}/" /boot/cmdline.txt
+            fi
+            reboot
           fi
           exit 1
           EOF
           
           cat << "EOF" > files/etc/uci-defaults/80-rootfs-resize
-          if [ ! -e /etc/rootfs-resize ] \
-          && [ -e /etc/rootpt-resize ] \
-          && type losetup > /dev/null \
-          && type resize2fs > /dev/null \
-          && lock -n /var/lock/root-resize
-          then
-          ROOT_BLK="$(readlink -f /sys/dev/block/"$(awk -e \
-          '$9=="/dev/root"{print $3}' /proc/self/mountinfo)")"
-          ROOT_DEV="/dev/${ROOT_BLK##*/}"
-          LOOP_DEV="$(awk -e '$5=="/overlay"{print $9}' \
-          /proc/self/mountinfo)"
-          if [ -z "${LOOP_DEV}" ]
-          then
-          LOOP_DEV="$(losetup -f)"
-          losetup "${LOOP_DEV}" "${ROOT_DEV}"
-          fi
-          resize2fs -f "${LOOP_DEV}"
-          mount_root done
-          touch /etc/rootfs-resize
-          reboot
+          if [ ! -e /etc/rootfs-resize ] && [ -e /etc/rootpt-resize ] && type losetup > /dev/null && type resize2fs > /dev/null && lock -n /var/lock/root-resize; then
+            ROOT_BLK="$(readlink -f /sys/dev/block/"$(awk -e '$9=="/dev/root"{print $3}' /proc/self/mountinfo)")"
+            ROOT_DEV="/dev/${ROOT_BLK##*/}"
+            LOOP_DEV="$(awk -e '$5=="/overlay"{print $9}' /proc/self/mountinfo)"
+            if [ -z "${LOOP_DEV}" ]; then
+              LOOP_DEV="$(losetup -f)"
+              losetup "${LOOP_DEV}" "${ROOT_DEV}"
+            fi
+            resize2fs -f "${LOOP_DEV}"
+            mount_root done
+            touch /etc/rootfs-resize
+            reboot
           fi
           exit 1
           EOF
@@ -94,19 +95,14 @@ jobs:
           /etc/uci-defaults/80-rootfs-resize
           EOF
 
-          # --- SCRIPT KONFIGURASI PERTAMA KALI (FIRST BOOT) ---
-          # Dinamakan 99-custom-config agar dieksekusi terakhir setelah config asli selesai
+          # --- 2. SCRIPT FIRST BOOT ---
           cat << "EOF" > files/etc/uci-defaults/99-custom-config
-          # Timezone
           uci set system.@system[0].timezone='WIB-7'
           uci set system.@system[0].zonename='Asia/Jakarta'
           uci commit system
 
-          # Network LAN
           uci set network.lan.ipaddr='192.168.10.1/24'
-          uci commit network
-
-          # ModemManager Dell DW5821e
+          
           uci -q delete network.Dell_DW5821e
           uci set network.Dell_DW5821e='interface'
           uci set network.Dell_DW5821e.proto='modemmanager'
@@ -121,36 +117,28 @@ jobs:
           uci set network.modem.proto='none'
           uci set network.modem.device='wwan0'
           uci set network.modem.force_link='1'
+          
+          uci set network.usbwan="interface"
+          uci set network.usbwan.ifname="usb0"
+          uci set network.usbwan.proto="dhcp"
           uci commit network
 
-          # Wireless
           uci set wireless.@wifi-device[0].disabled="0"
           uci set wireless.@wifi-device[0].channel="11"
           uci set wireless.@wifi-device[0].htmode="HT20"
-
           uci set wireless.@wifi-iface[0].disabled="0"
           uci set wireless.@wifi-iface[0].ssid="Linksys"
           uci set wireless.@wifi-iface[0].key="12345678"
           uci set wireless.@wifi-iface[0].encryption="none"
           uci commit wireless
 
-          # USB Tethering
-          uci set network.usbwan="interface"
-          uci set network.usbwan.ifname="usb0"
-          uci set network.usbwan.proto="dhcp"
-          uci commit network
-
-          # Firewall
           WAN_IDX=$(uci show firewall | grep -F ".name='wan'" | cut -d. -f2 | cut -d= -f1)
           uci add_list firewall.${WAN_IDX}.network="usbwan"
           uci add_list firewall.${WAN_IDX}.network="Dell_DW5821e"
           uci commit firewall
           
-          # Hapus skrip ini setelah sukses agar tidak berjalan dua kali
           exit 0
           EOF
-          
-          # Berikan hak akses eksekusi pada skrip
           chmod +x files/etc/uci-defaults/*
 
       - name: Patch Kernel Config (AMD IXP SB4x0)
@@ -162,61 +150,64 @@ jobs:
           echo "CONFIG_ATA_PIIX=m" >> $KERNEL_CONFIG
           echo "CONFIG_SATA_SIL=m" >> $KERNEL_CONFIG
 
-      - name: Generate .config
+      - name: Update and Install Feeds
         run: |
-          # 1. Download resep asli pabrik
-          wget https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/config.buildinfo -O .config
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Generate Config & Setup Ext-Toolchain
+        run: |
+          wget -q https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/config.buildinfo -O .config
           
-          # 2. Hapus buildbot overload
-          sed -i '/CONFIG_ALL_KMODS=y/d' .config
-          sed -i '/CONFIG_ALL_NONSHARED=y/d' .config
-          sed -i '/CONFIG_IB=y/d' .config
-          sed -i '/CONFIG_SDK=y/d' .config
-          sed -i '/CONFIG_SDK_LLVM_BPF=y/d' .config
-          sed -i '/CONFIG_MAKE_TOOLCHAIN=y/d' .config
-          sed -i '/CONFIG_BUILDBOT=y/d' .config
+          sed -i '/CONFIG_ALL_KMODS=y/d; /CONFIG_ALL_NONSHARED=y/d; /CONFIG_IB=y/d; /CONFIG_SDK=y/d; /CONFIG_SDK_LLVM_BPF=y/d; /CONFIG_MAKE_TOOLCHAIN=y/d; /CONFIG_BUILDBOT=y/d' .config
           
-          # 3. Tambah paket kmod dari chipset jadul
-          echo "CONFIG_PACKAGE_kmod-ata-core=y" >> .config
-          echo "CONFIG_PACKAGE_kmod-ata-piix=y" >> .config
-          echo "CONFIG_PACKAGE_kmod-ata-sil=y" >> .config
-          echo "CONFIG_PACKAGE_kmod-pata-atiixp=y" >> .config
+          # Memastikan format file ext4 ikut diproduksi
+          echo "CONFIG_TARGET_ROOTFS_EXT4FS=y" >> .config
+          echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config
           
-          # 4. Injeksi semua paket tambahan Anda secara otomatis
-          PACKAGES="kmod-usb-net-rtl8152 kmod-r8169 kmod-rtl8192se kmod-usb-ohci kmod-usb-ehci-pci kmod-usb2 kmod-pci kmod-i2c-piix4 kmod-ohci-pci kmod-ehci-pci kmod-k8temp kmod-radeon kmod-drm-radeon kmod-yenta-cardbus kmod-pcmcia-yenta kmod-firewire-ohci kmod-firewire-core kmod-tifm-7xx1 kmod-tifm-core kmod-sdhci-pci kmod-sdhci kmod-sound-hda-intel modemmanager modemmanager-rpcd libmbim libqmi luci-proto-modemmanager kmod-usb-serial-option kmod-usb-net-cdc-mbim umbim kmod-usb-acm kmod-usb-wdm kmod-usb-net-rndis parted losetup resize2fs blkid"
+          # Injeksi package
+          PACKAGES="kmod-usb-net-rtl8152 kmod-r8169 kmod-rtl8192se kmod-usb-ohci kmod-usb-ehci-pci kmod-usb2 kmod-pci kmod-i2c-piix4 kmod-ohci-pci kmod-ehci-pci kmod-k8temp kmod-radeon kmod-drm-radeon kmod-yenta-cardbus kmod-pcmcia-yenta kmod-firewire-ohci kmod-firewire-core kmod-tifm-7xx1 kmod-tifm-core kmod-sdhci-pci kmod-sdhci kmod-sound-hda-intel modemmanager modemmanager-rpcd libmbim libqmi luci-proto-modemmanager kmod-usb-serial-option kmod-usb-net-cdc-mbim umbim kmod-usb-acm kmod-usb-wdm kmod-usb-net-rndis parted losetup resize2fs blkid kmod-ata-core kmod-ata-piix kmod-ata-sil kmod-pata-atiixp"
           
           for pkg in $PACKAGES; do
             echo "CONFIG_PACKAGE_$pkg=y" >> .config
           done
           
-          # 5. Validasi
+          ./scripts/ext-toolchain.sh --toolchain /opt/toolchain --overwrite-config --config $TARGET_ARCH
+          
           make defconfig
 
-      - name: Download Package Sources
-        run: make download -j8
+      - name: Download Packages
+        run: |
+          make download -j8
+          find dl -size -1024c -exec rm -f {} \;
 
       - name: Compile Firmware
-        run: make -j$(nproc) V=s
+        run: |
+          echo -e "$(nproc) thread compile"
+          make -j$(nproc) || make -j1 V=s
 
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: openwrt-25.12.5-x86_64-custom
-          path: |
-            bin/targets/x86/64/*squashfs-combined.img.gz
-            bin/targets/x86/64/*squashfs-combined-efi.img.gz
-            bin/targets/x86/64/sha256sums
-          retention-days: 7
+      - name: Generate Release Tag
+        id: tag
+        run: |
+          echo "release_tag=v25.12.5-x86-$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_OUTPUT
+          echo "release_name=OpenWrt 25.12.5 x86_64 (Custom AMD IXP) $(date +'%Y.%m.%d')" >> $GITHUB_OUTPUT
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2.6.1
         with:
-          tag_name: "v25.12.5-x86-custom"
-          name: "OpenWrt 25.12.5 (AMD IXP + ModemManager + AutoResize)"
-          body: "Firmware custom dengan auto-resize rootfs, ModemManager Dell DW5821e, dan driver lengkap untuk laptop jadul."
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          name: ${{ steps.tag.outputs.release_name }}
           files: |
             bin/targets/x86/64/*squashfs-combined.img.gz
             bin/targets/x86/64/*squashfs-combined-efi.img.gz
+            bin/targets/x86/64/*ext4-combined.img.gz
+            bin/targets/x86/64/*ext4-combined-efi.img.gz
             bin/targets/x86/64/sha256sums
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          body: |
+            ## Custom OpenWrt 25.12.5 x86_64
+            
+            **Fitur:**
+            * Driver AMD IXP SB4x0 (PATA/SATA Jadul)
+            * ModemManager terkonfigurasi (Dell DW5821e)
+            * Skrip Auto-Resize Partisi & Filesystem
+            * Konfigurasi WiFi & LAN First Boot
