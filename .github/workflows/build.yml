@@ -195,26 +195,56 @@ jobs:
         run: |
           make target/linux/prepare V=s
 
-      - name: Verify AMD IXP Driver (Final Kernel Check)
+      - name: Diagnostic - Inspect Build Environment
         run: |
-          echo "Memeriksa hasil akhir Kernel Configuration setelah 'prepare'..."
-          KERNEL_CONFIG_FILE=$(find build_dir -path '*/linux-*/.config' | head -n 1)
+          echo "===== staging_dir ====="
+          find staging_dir -name '*config*' | sort || true
+
+          echo "===== build_dir (Directories) ====="
+          find build_dir -maxdepth 4 -type d | sort || true
+          
+          echo "===== build_dir (Config Files) ====="
+          find build_dir -name '.config' | sort || true
+
+          echo "===== tmp ====="
+          find tmp -maxdepth 3 | sort || true
+          find tmp -name '*config*' | sort || true
+
+      - name: Download Packages
+        run: |
+          make download -j8
+          find dl -size -1024c -exec rm -f {} \;
+
+      - name: Compile Firmware
+        run: |
+          echo -e "$(nproc) thread compile"
+          make -j$(nproc) || make -j1 V=s
+
+      - name: Verify AMD IXP Driver (Post-Compile Final Kernel Check)
+        run: |
+          echo "Mencari file .config kernel di dalam direktori build_dir setelah kompilasi..."
+          
+          # Pencarian kebal nama folder
+          KERNEL_CONFIG_FILE=$(find build_dir -type f -name ".config" | grep "/linux-" | head -n 1)
           
           if [ -z "$KERNEL_CONFIG_FILE" ]; then
-            echo "❌ Error: File .config kernel tidak ditemukan!"
+            echo "❌ Error: File .config kernel tetap tidak ditemukan bahkan setelah proses compile selesai!"
             exit 1
           fi
           
-          echo "Memverifikasi opsi Kernel di: $KERNEL_CONFIG_FILE"
+          echo "✅ Ditemukan file konfigurasi Kernel final di: $KERNEL_CONFIG_FILE"
+          echo "Memverifikasi opsi Kernel bawaan (Built-in)..."
           
           for opt in CONFIG_ATA CONFIG_ATA_SFF CONFIG_ATA_BMDMA CONFIG_PATA_ATIIXP CONFIG_ATA_PIIX CONFIG_SATA_SIL; do
               grep -q "^${opt}=y$" "$KERNEL_CONFIG_FILE" || {
                   echo "❌ GAGAL: Setelan kernel '$opt' tidak ditemukan atau bukan =y!"
+                  echo "Isi file terkait '$opt' saat ini:"
+                  grep "$opt" "$KERNEL_CONFIG_FILE" || echo "(Tidak ada satupun baris yang cocok)"
                   exit 1
               }
           done
-          echo "✅ VERIFIKASI SUKSES: Semua sub-sistem ATA/PATA berhasil ditanamkan ke dalam inti Kernel!"
-
+          echo "✅ VERIFIKASI SUKSES: Semua sub-sistem ATA/PATA dipastikan tertanam ke dalam inti Kernel!"
+          
       - name: Download Packages
         run: |
           make download -j8
