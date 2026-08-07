@@ -1,7 +1,7 @@
-name: Build OpenWrt 25.12.5 x86_64 (AMD IXP SB4x0)
+name: Build OpenWrt 25.12.5 x86_64 (Custom AMD IXP + Modem + Resize)
 
 on:
-  workflow_dispatch: # Tidak ada isian/input, tinggal klik "Run workflow"
+  workflow_dispatch:
 
 jobs:
   build:
@@ -19,17 +19,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: openwrt/openwrt
-          ref: v25.12.5 # Mengacu pada rilis spesifik 25.12.5
+          ref: v25.12.5
 
       - name: Download & Extract Pre-compiled Toolchain & LLVM
         run: |
-          # Mengunduh toolchain dan LLVM dari URL yang diberikan
           wget https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/openwrt-toolchain-25.12.5-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
           wget https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/llvm-bpf-21.1.6.Linux-x86_64.tar.zst
-          
-          # Mengekstrak arsip langsung ke direktori root OpenWrt. 
-          # Ini akan otomatis mengisi folder staging_dir/, sehingga OpenWrt akan mendeteksinya 
-          # dan melewati (skip) proses kompilasi GCC dan LLVM yang memakan waktu lama.
           tar --zstd -xf openwrt-toolchain-25.12.5-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
           tar --zstd -xf llvm-bpf-21.1.6.Linux-x86_64.tar.zst
 
@@ -38,13 +33,129 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
+      - name: Inject Custom Scripts & UCI Defaults
+        run: |
+          # Membuat struktur folder rootfs buatan
+          mkdir -p files/etc/uci-defaults
+          
+          # --- SCRIPT RESIZE PARTISI & FILESYSTEM ---
+          cat << "EOF" > files/etc/uci-defaults/70-rootpt-resize
+          if [ ! -e /etc/rootpt-resize ] \
+          && type parted > /dev/null \
+          && lock -n /var/lock/root-resize
+          then
+          ROOT_BLK="$(readlink -f /sys/dev/block/"$(awk -e \
+          '$9=="/dev/root"{print $3}' /proc/self/mountinfo)")"
+          ROOT_DISK="/dev/$(basename "${ROOT_BLK%/*}")"
+          ROOT_PART="${ROOT_BLK##*[^0-9]}"
+          parted -f -s "${ROOT_DISK}" \
+          resizepart "${ROOT_PART}" 100%
+          mount_root done
+          touch /etc/rootpt-resize
+
+          if [ -e /boot/cmdline.txt ]
+          then 
+          NEW_UUID=`blkid ${ROOT_DISK}p${ROOT_PART} | sed -n 's/.*PARTUUID="\([^"]*\)".*/\1/p'`
+          sed -i "s/PARTUUID=[^ ]*/PARTUUID=${NEW_UUID}/" /boot/cmdline.txt
+          fi
+
+          reboot
+          fi
+          exit 1
+          EOF
+          
+          cat << "EOF" > files/etc/uci-defaults/80-rootfs-resize
+          if [ ! -e /etc/rootfs-resize ] \
+          && [ -e /etc/rootpt-resize ] \
+          && type losetup > /dev/null \
+          && type resize2fs > /dev/null \
+          && lock -n /var/lock/root-resize
+          then
+          ROOT_BLK="$(readlink -f /sys/dev/block/"$(awk -e \
+          '$9=="/dev/root"{print $3}' /proc/self/mountinfo)")"
+          ROOT_DEV="/dev/${ROOT_BLK##*/}"
+          LOOP_DEV="$(awk -e '$5=="/overlay"{print $9}' \
+          /proc/self/mountinfo)"
+          if [ -z "${LOOP_DEV}" ]
+          then
+          LOOP_DEV="$(losetup -f)"
+          losetup "${LOOP_DEV}" "${ROOT_DEV}"
+          fi
+          resize2fs -f "${LOOP_DEV}"
+          mount_root done
+          touch /etc/rootfs-resize
+          reboot
+          fi
+          exit 1
+          EOF
+          
+          cat << "EOF" >> files/etc/sysupgrade.conf
+          /etc/uci-defaults/70-rootpt-resize
+          /etc/uci-defaults/80-rootfs-resize
+          EOF
+
+          # --- SCRIPT KONFIGURASI PERTAMA KALI (FIRST BOOT) ---
+          # Dinamakan 99-custom-config agar dieksekusi terakhir setelah config asli selesai
+          cat << "EOF" > files/etc/uci-defaults/99-custom-config
+          # Timezone
+          uci set system.@system[0].timezone='WIB-7'
+          uci set system.@system[0].zonename='Asia/Jakarta'
+          uci commit system
+
+          # Network LAN
+          uci set network.lan.ipaddr='192.168.10.1/24'
+          uci commit network
+
+          # ModemManager Dell DW5821e
+          uci -q delete network.Dell_DW5821e
+          uci set network.Dell_DW5821e='interface'
+          uci set network.Dell_DW5821e.proto='modemmanager'
+          uci set network.Dell_DW5821e.force_link='1'
+          uci set network.Dell_DW5821e.apn='internet'
+          uci add_list network.Dell_DW5821e.allowedauth='none'
+          uci set network.Dell_DW5821e.iptype='ipv4'
+          uci set network.Dell_DW5821e.loglevel='ERR'
+
+          uci -q delete network.modem
+          uci set network.modem='interface'
+          uci set network.modem.proto='none'
+          uci set network.modem.device='wwan0'
+          uci set network.modem.force_link='1'
+          uci commit network
+
+          # Wireless
+          uci set wireless.@wifi-device[0].disabled="0"
+          uci set wireless.@wifi-device[0].channel="11"
+          uci set wireless.@wifi-device[0].htmode="HT20"
+
+          uci set wireless.@wifi-iface[0].disabled="0"
+          uci set wireless.@wifi-iface[0].ssid="Linksys"
+          uci set wireless.@wifi-iface[0].key="12345678"
+          uci set wireless.@wifi-iface[0].encryption="none"
+          uci commit wireless
+
+          # USB Tethering
+          uci set network.usbwan="interface"
+          uci set network.usbwan.ifname="usb0"
+          uci set network.usbwan.proto="dhcp"
+          uci commit network
+
+          # Firewall
+          WAN_IDX=$(uci show firewall | grep -F ".name='wan'" | cut -d. -f2 | cut -d= -f1)
+          uci add_list firewall.${WAN_IDX}.network="usbwan"
+          uci add_list firewall.${WAN_IDX}.network="Dell_DW5821e"
+          uci commit firewall
+          
+          # Hapus skrip ini setelah sukses agar tidak berjalan dua kali
+          exit 0
+          EOF
+          
+          # Berikan hak akses eksekusi pada skrip
+          chmod +x files/etc/uci-defaults/*
+
       - name: Patch Kernel Config (AMD IXP SB4x0)
         run: |
-          # Berdasarkan URL kmods Anda, versi kernel target adalah 6.12
           KERNEL_CONFIG="target/linux/x86/config-6.12"
-          
-          echo "Menambahkan konfigurasi driver PATA/SATA jadul ke $KERNEL_CONFIG"
-          
           echo "CONFIG_ATA=y" >> $KERNEL_CONFIG
           echo "CONFIG_ATA_SFF=y" >> $KERNEL_CONFIG
           echo "CONFIG_PATA_ATIIXP=m" >> $KERNEL_CONFIG
@@ -53,31 +164,59 @@ jobs:
 
       - name: Generate .config
         run: |
-          # Menentukan target arsitektur
-          echo "CONFIG_TARGET_x86=y" > .config
-          echo "CONFIG_TARGET_x86_64=y" >> .config
-          echo "CONFIG_TARGET_x86_64_DEVICE_generic=y" >> .config
+          # 1. Download resep asli pabrik
+          wget https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/config.buildinfo -O .config
           
-          # Meminta OpenWrt membuat package kmod untuk driver yang sudah dipatch di kernel
+          # 2. Hapus buildbot overload
+          sed -i '/CONFIG_ALL_KMODS=y/d' .config
+          sed -i '/CONFIG_ALL_NONSHARED=y/d' .config
+          sed -i '/CONFIG_IB=y/d' .config
+          sed -i '/CONFIG_SDK=y/d' .config
+          sed -i '/CONFIG_SDK_LLVM_BPF=y/d' .config
+          sed -i '/CONFIG_MAKE_TOOLCHAIN=y/d' .config
+          sed -i '/CONFIG_BUILDBOT=y/d' .config
+          
+          # 3. Tambah paket kmod dari chipset jadul
           echo "CONFIG_PACKAGE_kmod-ata-core=y" >> .config
           echo "CONFIG_PACKAGE_kmod-ata-piix=y" >> .config
           echo "CONFIG_PACKAGE_kmod-ata-sil=y" >> .config
           echo "CONFIG_PACKAGE_kmod-pata-atiixp=y" >> .config
           
-          # Memvalidasi konfigurasi
+          # 4. Injeksi semua paket tambahan Anda secara otomatis
+          PACKAGES="kmod-usb-net-rtl8152 kmod-r8169 kmod-rtl8192se kmod-usb-ohci kmod-usb-ehci-pci kmod-usb2 kmod-pci kmod-i2c-piix4 kmod-ohci-pci kmod-ehci-pci kmod-k8temp kmod-radeon kmod-drm-radeon kmod-yenta-cardbus kmod-pcmcia-yenta kmod-firewire-ohci kmod-firewire-core kmod-tifm-7xx1 kmod-tifm-core kmod-sdhci-pci kmod-sdhci kmod-sound-hda-intel modemmanager modemmanager-rpcd libmbim libqmi luci-proto-modemmanager kmod-usb-serial-option kmod-usb-net-cdc-mbim umbim kmod-usb-acm kmod-usb-wdm kmod-usb-net-rndis parted losetup resize2fs blkid"
+          
+          for pkg in $PACKAGES; do
+            echo "CONFIG_PACKAGE_$pkg=y" >> .config
+          done
+          
+          # 5. Validasi
           make defconfig
 
       - name: Download Package Sources
         run: make download -j8
 
-      - name: Compile Firmware & Kernel Modules
-        run: |
-          # Menggunakan seluruh core yang tersedia pada runner GitHub Actions
-          make -j$(nproc) V=s
+      - name: Compile Firmware
+        run: make -j$(nproc) V=s
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt-25.12.5-x86_64-amd-ixp
-          path: bin/targets/x86/64/
+          name: openwrt-25.12.5-x86_64-custom
+          path: |
+            bin/targets/x86/64/*squashfs-combined.img.gz
+            bin/targets/x86/64/*squashfs-combined-efi.img.gz
+            bin/targets/x86/64/sha256sums
           retention-days: 7
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v25.12.5-x86-custom"
+          name: "OpenWrt 25.12.5 (AMD IXP + ModemManager + AutoResize)"
+          body: "Firmware custom dengan auto-resize rootfs, ModemManager Dell DW5821e, dan driver lengkap untuk laptop jadul."
+          files: |
+            bin/targets/x86/64/*squashfs-combined.img.gz
+            bin/targets/x86/64/*squashfs-combined-efi.img.gz
+            bin/targets/x86/64/sha256sums
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
