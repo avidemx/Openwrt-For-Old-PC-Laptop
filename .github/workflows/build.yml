@@ -175,6 +175,8 @@ jobs:
           
           ./scripts/ext-toolchain.sh --toolchain /opt/toolchain --overwrite-config --config $TARGET_ARCH
           
+          unset TARGET_ARCH
+          
           make defconfig V=s
 
       - name: Download Packages
