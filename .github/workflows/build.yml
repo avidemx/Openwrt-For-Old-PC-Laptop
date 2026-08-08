@@ -267,18 +267,17 @@ jobs:
           echo "✅ VERIFIKASI SUKSES: Semua sub-sistem ATA/PATA dipastikan tertanam ke dalam inti Kernel!"
 
       - name: Pack All Kmod Packages
+        continue-on-error: true
         run: |
-          echo "Memaketkan semua modul kmod yang telah dikompilasi..."
-          # Pastikan folder target ada
-          if [ -d "bin/packages/x86_64/base" ]; then
-            cd bin/packages/x86_64/base
-            # Mengkompresi semua file .apk (kmod) ke dalam satu file .zip
-            zip -r kmod-backup-all.zip kmod-*.apk
-            # Pindahkan file .zip ke direktori root workspace agar mudah dirilis
-            mv kmod-backup-all.zip $GITHUB_WORKSPACE/
-            echo "✅ Pemaketan kmod selesai."
+          echo "Mencari dan memaketkan semua modul kmod..."
+          
+          # Cari semua file kmod-*.apk di seluruh subdirektori bin/ dan gabungkan ke dalam zip
+          find bin/ -type f -name "kmod-*.apk" | zip -j@ $GITHUB_WORKSPACE/kmod-backup-all.zip || true
+          
+          if [ -f "$GITHUB_WORKSPACE/kmod-backup-all.zip" ]; then
+            echo "✅ Pemaketan kmod berhasil!"
           else
-            echo "⚠️ Peringatan: Direktori base kmod tidak ditemukan."
+            echo "⚠️ Peringatan: File kmod-*.apk tidak ditemukan atau zip gagal dibuat. Melanjutkan rilis..."
           fi
 
       - name: Generate Release Tag
@@ -292,6 +291,7 @@ jobs:
         with:
           tag_name: ${{ steps.tag.outputs.release_tag }}
           name: ${{ steps.tag.outputs.release_name }}
+          fail_on_unmatched_files: false
           files: |
             bin/targets/x86/64/*squashfs-combined.img.gz
             bin/targets/x86/64/*squashfs-combined-efi.img.gz
