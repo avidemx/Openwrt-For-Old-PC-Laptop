@@ -195,7 +195,12 @@ jobs:
           echo "CONFIG_TARGET_ROOTFS_EXT4FS=y" >> .config
           echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config
           
-          PACKAGES="kmod-ath9k wpad-basic-wolfssl kmod-usb-net-rtl8152 kmod-r8169 kmod-rtl8192se kmod-usb-ohci kmod-usb-ehci-pci kmod-usb2 kmod-pci kmod-i2c-piix4 kmod-ohci-pci kmod-ehci-pci kmod-k8temp kmod-radeon kmod-drm-radeon kmod-yenta-cardbus kmod-pcmcia-yenta kmod-firewire-ohci kmod-firewire-core kmod-tifm-7xx1 kmod-tifm-core kmod-sdhci-pci kmod-sdhci kmod-sound-hda-intel modemmanager modemmanager-rpcd libmbim libqmi luci-proto-modemmanager kmod-usb-serial-option kmod-usb-net-cdc-mbim umbim kmod-usb-acm kmod-usb-wdm kmod-usb-net-rndis parted losetup resize2fs blkid"
+          # Mengaktifkan kompilasi semua kmod (sebagai modul =m)
+          echo "CONFIG_ALL_KMODS=y" >> .config
+          
+          # Daftar paket esensial untuk perangkat (dijadikan =y)
+          # Menambahkan alsa-utils dan driver audio
+          PACKAGES="kmod-ath9k kmod-tun kmod-r8169 kmod-sound-core kmod-sound-hda-core kmod-sound-hda-intel kmod-ac97 kmod-sound-i8x0 alsa-utils wpad-basic-wolfssl kmod-usb-net-rtl8152 kmod-rtl8192se kmod-usb-ohci kmod-usb-ehci-pci kmod-usb2 kmod-pci kmod-i2c-piix4 kmod-ohci-pci kmod-ehci-pci kmod-k8temp kmod-radeon kmod-drm-radeon kmod-yenta-cardbus kmod-pcmcia-yenta kmod-firewire-ohci kmod-firewire-core kmod-tifm-7xx1 kmod-tifm-core kmod-sdhci-pci kmod-sdhci modemmanager modemmanager-rpcd libmbim libqmi luci-proto-modemmanager kmod-usb-serial-option kmod-usb-net-cdc-mbim umbim kmod-usb-acm kmod-usb-wdm kmod-usb-net-rndis parted losetup resize2fs blkid"
           
           for pkg in $PACKAGES; do
             echo "CONFIG_PACKAGE_$pkg=y" >> .config
@@ -260,16 +265,21 @@ jobs:
               }
           done
           echo "✅ VERIFIKASI SUKSES: Semua sub-sistem ATA/PATA dipastikan tertanam ke dalam inti Kernel!"
-          
-      - name: Download Packages
-        run: |
-          make download -j8
-          find dl -size -1024c -exec rm -f {} \;
 
-      - name: Compile Firmware
+      - name: Pack All Kmod Packages
         run: |
-          echo -e "$(nproc) thread compile"
-          make -j$(nproc) || make -j1 V=s
+          echo "Memaketkan semua modul kmod yang telah dikompilasi..."
+          # Pastikan folder target ada
+          if [ -d "bin/packages/x86_64/base" ]; then
+            cd bin/packages/x86_64/base
+            # Mengkompresi semua file .apk (kmod) ke dalam satu file .zip
+            zip -r kmod-backup-all.zip kmod-*.apk
+            # Pindahkan file .zip ke direktori root workspace agar mudah dirilis
+            mv kmod-backup-all.zip $GITHUB_WORKSPACE/
+            echo "✅ Pemaketan kmod selesai."
+          else
+            echo "⚠️ Peringatan: Direktori base kmod tidak ditemukan."
+          fi
 
       - name: Generate Release Tag
         id: tag
@@ -288,3 +298,4 @@ jobs:
             bin/targets/x86/64/*ext4-combined.img.gz
             bin/targets/x86/64/*ext4-combined-efi.img.gz
             bin/targets/x86/64/sha256sums
+            kmod-backup-all.zip
